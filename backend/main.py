@@ -33,6 +33,47 @@ EXTENSOES_PERMITIDAS = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff
 modelo_gemini: Optional[genai.GenerativeModel] = None
 gemini_disponivel: bool = False
 
+# Modelos preferidos em ordem de prioridade (do mais novo ao mais antigo)
+MODELOS_PREFERIDOS = [
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-lite",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-pro",
+    "gemini-1.5-pro-latest",
+    "gemini-pro-vision",
+]
+
+
+def _detectar_modelo_disponivel() -> str:
+    """
+    Lista os modelos disponíveis na conta e retorna o melhor compatível.
+    Seleciona o primeiro da lista de preferidos que suporte generateContent.
+    Caso nenhum seja encontrado, usa gemini-2.0-flash como padrão.
+    """
+    try:
+        modelos_disponiveis = set()
+        for m in genai.list_models():
+            if "generateContent" in (m.supported_generation_methods or []):
+                modelos_disponiveis.add(m.name.replace("models/", ""))
+
+        logger.info(f"Modelos disponíveis na conta: {sorted(modelos_disponiveis)}")
+
+        for preferido in MODELOS_PREFERIDOS:
+            if preferido in modelos_disponiveis:
+                return preferido
+
+        # Se nenhum preferido estiver disponível, usa o primeiro da lista
+        if modelos_disponiveis:
+            escolhido = sorted(modelos_disponiveis)[0]
+            logger.warning(f"Nenhum modelo preferido encontrado. Usando: {escolhido}")
+            return escolhido
+
+    except Exception as e:
+        logger.warning(f"Não foi possível listar modelos ({e}). Usando padrão: gemini-2.0-flash")
+
+    return "gemini-2.0-flash"
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -51,8 +92,9 @@ async def lifespan(app: FastAPI):
     else:
         try:
             genai.configure(api_key=api_key)
+            nome_modelo = _detectar_modelo_disponivel()
             modelo_gemini = genai.GenerativeModel(
-                model_name="gemini-1.5-flash",
+                model_name=nome_modelo,
                 generation_config={
                     "temperature": 0.1,
                     "top_p": 0.95,
@@ -60,7 +102,7 @@ async def lifespan(app: FastAPI):
                 }
             )
             gemini_disponivel = True
-            logger.info("✅ Google Gemini configurado com sucesso")
+            logger.info(f"✅ Google Gemini configurado com sucesso — modelo: {nome_modelo}")
         except Exception as e:
             logger.error(f"❌ Erro ao configurar Gemini: {e}")
             gemini_disponivel = False

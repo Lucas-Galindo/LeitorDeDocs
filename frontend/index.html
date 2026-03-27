@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LeitorDeDocs — Extração Inteligente de Documentos</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <!-- Header -->
+  <header class="header">
+    <div class="header-inner">
+      <div class="logo">
+        <svg width="32" height="32" viewBox="0 0 32 32" fill="none">
+          <rect width="32" height="32" rx="8" fill="#2563eb"/>
+          <path d="M8 10h16M8 16h10M8 22h12" stroke="white" stroke-width="2.5" stroke-linecap="round"/>
+          <circle cx="24" cy="22" r="4" fill="#10b981" stroke="white" stroke-width="1.5"/>
+          <path d="M22.5 22l1 1 2-2" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span>LeitorDeDocs</span>
+      </div>
+      <div id="api-status" class="api-status checking">
+        <span class="status-dot"></span>
+        <span class="status-text">Verificando API...</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="main">
+    <!-- Seção de Upload -->
+    <section id="upload-section" class="section">
+      <div class="section-header">
+        <h1>Envio de Documentos</h1>
+        <p>Envie múltiplos documentos de uma vez. O sistema identificará e extrairá os dados automaticamente.</p>
+      </div>
+
+      <!-- Área de drag-and-drop -->
+      <div id="drop-zone" class="drop-zone">
+        <div class="drop-zone-content">
+          <svg class="drop-icon" viewBox="0 0 64 64" fill="none">
+            <path d="M32 8v32M20 20l12-12 12 12" stroke="#2563eb" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+            <path d="M12 44v8a2 2 0 002 2h36a2 2 0 002-2v-8" stroke="#94a3b8" stroke-width="2.5" stroke-linecap="round"/>
+          </svg>
+          <p class="drop-title">Arraste os arquivos aqui</p>
+          <p class="drop-subtitle">ou</p>
+          <label class="btn btn-primary" for="file-input">
+            Selecionar Arquivos
+          </label>
+          <input type="file" id="file-input" multiple accept=".pdf,.jpg,.jpeg,.png,.webp,.bmp,.tiff,.tif" />
+          <p class="drop-hint">PDF, JPG, PNG, WEBP, BMP, TIFF · Máx. 20MB por arquivo · Até 20 arquivos</p>
+        </div>
+      </div>
+
+      <!-- Documentos suportados -->
+      <div class="supported-docs">
+        <p class="supported-label">Documentos suportados:</p>
+        <div class="doc-tags">
+          <span class="doc-tag">CNH</span>
+          <span class="doc-tag">MOPP</span>
+          <span class="doc-tag">NR20</span>
+          <span class="doc-tag">NR35</span>
+          <span class="doc-tag">Licenciamento</span>
+          <span class="doc-tag">CIV</span>
+          <span class="doc-tag">CIPP</span>
+          <span class="doc-tag">Calibragem</span>
+          <span class="doc-tag">Cronotacógrafo</span>
+        </div>
+      </div>
+
+      <!-- Lista de arquivos selecionados -->
+      <div id="file-list" class="file-list hidden"></div>
+
+      <!-- Botão processar -->
+      <div id="process-bar" class="process-bar hidden">
+        <div class="process-info">
+          <span id="file-count">0 arquivos selecionados</span>
+          <button id="clear-files" class="btn btn-ghost">Limpar</button>
+        </div>
+        <button id="process-btn" class="btn btn-success btn-large">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M10 2a8 8 0 100 16A8 8 0 0010 2z" stroke="currentColor" stroke-width="1.5"/>
+            <path d="M7 10l2 2 4-4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Processar Documentos
+        </button>
+      </div>
+    </section>
+
+    <!-- Seção de Loading -->
+    <section id="loading-section" class="section hidden">
+      <div class="loading-container">
+        <div class="spinner"></div>
+        <h2>Processando documentos...</h2>
+        <p id="loading-text">Enviando arquivos para análise...</p>
+        <div class="progress-bar-container">
+          <div id="progress-bar" class="progress-bar"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Seção de Resultados -->
+    <section id="results-section" class="section hidden">
+      <div class="results-header">
+        <div>
+          <h2>Documentos Processados</h2>
+          <p id="results-summary"></p>
+        </div>
+        <div class="results-actions">
+          <button id="export-json-btn" class="btn btn-outline">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M2 12l2-4 2 4M3.5 10.5h2M8 8v4M8 8l1.5 1.5M8 8l-1.5 1.5M11 8h1.5a1.5 1.5 0 010 3H11" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+            Exportar JSON
+          </button>
+          <button id="new-upload-btn" class="btn btn-primary">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+              <path d="M8 2v8M4 6l4-4 4 4M2 12h12" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+            </svg>
+            Novo Upload
+          </button>
+        </div>
+      </div>
+
+      <!-- Alertas de documentos reconhecidos / faltantes -->
+      <div id="doc-alerts" class="doc-alerts"></div>
+
+      <!-- Cards de documentos com erros -->
+      <div id="error-cards" class="error-cards"></div>
+
+      <!-- Formulário de revisão de dados -->
+      <div id="results-form" class="results-form"></div>
+
+      <!-- Botão confirmar -->
+      <div class="confirm-bar">
+        <button id="confirm-btn" class="btn btn-success btn-large">
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="none">
+            <path d="M4 10l5 5 8-8" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+          Confirmar e Salvar Cadastro
+        </button>
+      </div>
+    </section>
+
+    <!-- Seção de Confirmação Final -->
+    <section id="confirm-section" class="section hidden">
+      <div class="confirm-container">
+        <div class="confirm-icon">
+          <svg viewBox="0 0 64 64" fill="none">
+            <circle cx="32" cy="32" r="28" fill="#10b981" opacity="0.15"/>
+            <circle cx="32" cy="32" r="20" fill="#10b981"/>
+            <path d="M22 32l8 8 14-14" stroke="white" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <h2>Cadastro Confirmado!</h2>
+        <p>Os dados foram salvos com sucesso.</p>
+        <div id="confirm-summary" class="confirm-summary"></div>
+        <button id="restart-btn" class="btn btn-primary">
+          Processar Novos Documentos
+        </button>
+      </div>
+    </section>
+  </main>
+
+  <script src="app.js"></script>
+</body>
+</html>

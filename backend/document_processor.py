@@ -1,23 +1,19 @@
 """
 Processador de documentos usando Google Gemini AI.
-Responsável por identificar o tipo de documento e extrair dados estruturados.
 """
 import io
 import json
 import logging
 import base64
 from pathlib import Path
-from typing import Optional
 
 import google.generativeai as genai
 from PIL import Image
 
 logger = logging.getLogger(__name__)
 
-# Tipos de documentos suportados
 TIPOS_DOCUMENTOS = ["CNH", "MOPP", "NR20", "NR35", "Licenciamento", "CIV", "CIPP", "Calibragem", "Cronotacógrafo"]
 
-# Prompt base para extração de documentos
 PROMPT_EXTRACAO = """Você é um sistema especializado em leitura e extração de dados de documentos brasileiros de transporte e segurança do trabalho.
 
 Analise a imagem fornecida e:
@@ -144,18 +140,34 @@ IMPORTANTE:
 
 
 def converter_pdf_para_imagens(pdf_bytes: bytes) -> list[Image.Image]:
-    """Converte um PDF em lista de imagens PIL."""
+    """
+    Converte PDF em imagens usando PyMuPDF (fitz).
+    NÃO requer Poppler — funciona em qualquer sistema operacional.
+    """
     try:
-        from pdf2image import convert_from_bytes
-        imagens = convert_from_bytes(pdf_bytes, dpi=200, fmt="RGB")
+        import fitz  # PyMuPDF
+
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+        imagens = []
+
+        for numero_pagina in range(len(doc)):
+            pagina = doc[numero_pagina]
+            # DPI 200 → zoom = 200/72
+            matriz = fitz.Matrix(200 / 72, 200 / 72)
+            pixmap = pagina.get_pixmap(matrix=matriz, colorspace=fitz.csRGB)
+            img_bytes = pixmap.tobytes("jpeg")
+            imagem = Image.open(io.BytesIO(img_bytes))
+            imagens.append(imagem)
+
+        doc.close()
         return imagens
+
     except Exception as e:
         logger.error(f"Erro ao converter PDF: {e}")
         raise ValueError(f"Não foi possível converter o PDF: {str(e)}")
 
 
 def imagem_para_bytes(imagem: Image.Image, formato: str = "JPEG") -> bytes:
-    """Converte imagem PIL para bytes."""
     buffer = io.BytesIO()
     imagem.save(buffer, format=formato, quality=95)
     return buffer.getvalue()
@@ -166,21 +178,9 @@ def processar_documento(
     nome_arquivo: str,
     modelo_gemini: genai.GenerativeModel
 ) -> dict:
-    """
-    Processa um único documento e retorna os dados extraídos.
-
-    Args:
-        arquivo_bytes: Conteúdo do arquivo em bytes
-        nome_arquivo: Nome original do arquivo
-        modelo_gemini: Instância do modelo Gemini configurado
-
-    Returns:
-        Dicionário com tipo_documento e dados extraídos
-    """
     extensao = Path(nome_arquivo).suffix.lower()
     imagens: list[Image.Image] = []
 
-    # Determina como carregar o arquivo
     if extensao == ".pdf":
         imagens = converter_pdf_para_imagens(arquivo_bytes)
     elif extensao in [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"]:
@@ -192,38 +192,27 @@ def processar_documento(
     if not imagens:
         raise ValueError("Nenhuma imagem pôde ser extraída do arquivo")
 
-    # Usa apenas a primeira imagem (ou as primeiras páginas para PDFs multipágina)
-    # Para documentos longos, processa até 3 páginas
     imagens_para_processar = imagens[:3]
-
-    # Prepara o conteúdo para o Gemini
     partes = [PROMPT_EXTRACAO]
 
-    for i, img in enumerate(imagens_para_processar):
-        # Converte para RGB se necessário
+    for img in imagens_para_processar:
         if img.mode not in ("RGB", "L"):
             img = img.convert("RGB")
-
         img_bytes = imagem_para_bytes(img)
         partes.append({
             "mime_type": "image/jpeg",
             "data": base64.b64encode(img_bytes).decode("utf-8")
         })
 
-    # Envia para o Gemini
     resposta = modelo_gemini.generate_content(partes)
     texto_resposta = resposta.text.strip()
 
-    # Remove possíveis marcadores de código markdown
     if texto_resposta.startswith("```"):
         linhas = texto_resposta.split("\n")
-        # Remove primeira e última linha se forem marcadores
         if linhas[0].startswith("```"):
             linhas = linhas[1:]
         if linhas and linhas[-1].strip() == "```":
             linhas = linhas[:-1]
         texto_resposta = "\n".join(linhas)
 
-    # Parseia o JSON
-    resultado = json.loads(texto_resposta)
-    return resultado
+    return json.loads(texto_resposta)

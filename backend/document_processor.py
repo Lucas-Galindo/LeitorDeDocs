@@ -141,8 +141,8 @@ IMPORTANTE:
 
 def converter_pdf_para_imagens(pdf_bytes: bytes) -> list[Image.Image]:
     """
-    Converte PDF em imagens usando PyMuPDF (fitz).
-    NÃO requer Poppler — funciona em qualquer sistema operacional.
+    Converte um PDF em lista de imagens PIL usando PyMuPDF (fitz).
+    Não requer Poppler nem nenhuma dependência externa do sistema.
     """
     try:
         import fitz  # PyMuPDF
@@ -152,7 +152,7 @@ def converter_pdf_para_imagens(pdf_bytes: bytes) -> list[Image.Image]:
 
         for numero_pagina in range(len(doc)):
             pagina = doc[numero_pagina]
-            # DPI 200 → zoom = 200/72
+            # DPI 200 → zoom = 200/72 ≈ 2.78
             matriz = fitz.Matrix(200 / 72, 200 / 72)
             pixmap = pagina.get_pixmap(matrix=matriz, colorspace=fitz.csRGB)
             img_bytes = pixmap.tobytes("jpeg")

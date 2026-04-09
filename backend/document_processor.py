@@ -1,14 +1,16 @@
 """
-Processador de documentos usando Google Gemini AI.
+Processador de documentos — agnóstico ao provedor de IA.
+Converte arquivos em imagens e delega a extração para o AIProvider configurado.
 """
+import base64
 import io
 import json
 import logging
-import base64
 from pathlib import Path
 
-import google.generativeai as genai
 from PIL import Image
+
+from ai_provider import AIProvider
 
 logger = logging.getLogger(__name__)
 
@@ -141,8 +143,8 @@ IMPORTANTE:
 
 def converter_pdf_para_imagens(pdf_bytes: bytes) -> list[Image.Image]:
     """
-    Converte um PDF em lista de imagens PIL usando PyMuPDF (fitz).
-    Não requer Poppler nem nenhuma dependência externa do sistema.
+    Converte PDF em imagens usando PyMuPDF (fitz).
+    Não requer Poppler — funciona em qualquer sistema operacional.
     """
     try:
         import fitz  # PyMuPDF
@@ -152,7 +154,7 @@ def converter_pdf_para_imagens(pdf_bytes: bytes) -> list[Image.Image]:
 
         for numero_pagina in range(len(doc)):
             pagina = doc[numero_pagina]
-            # DPI 200 → zoom = 200/72 ≈ 2.78
+            # DPI 200 → zoom = 200/72
             matriz = fitz.Matrix(200 / 72, 200 / 72)
             pixmap = pagina.get_pixmap(matrix=matriz, colorspace=fitz.csRGB)
             img_bytes = pixmap.tobytes("jpeg")
@@ -167,45 +169,52 @@ def converter_pdf_para_imagens(pdf_bytes: bytes) -> list[Image.Image]:
         raise ValueError(f"Não foi possível converter o PDF: {str(e)}")
 
 
-def imagem_para_bytes(imagem: Image.Image, formato: str = "JPEG") -> bytes:
+def imagem_para_bytes(imagem: Image.Image) -> bytes:
+    """Converte imagem PIL para bytes JPEG."""
     buffer = io.BytesIO()
-    imagem.save(buffer, format=formato, quality=95)
+    if imagem.mode not in ("RGB", "L"):
+        imagem = imagem.convert("RGB")
+    imagem.save(buffer, format="JPEG", quality=95)
     return buffer.getvalue()
 
 
 def processar_documento(
     arquivo_bytes: bytes,
     nome_arquivo: str,
-    modelo_gemini: genai.GenerativeModel
+    provider: AIProvider
 ) -> dict:
+    """
+    Processa um único documento e retorna os dados extraídos.
+
+    Args:
+        arquivo_bytes: Conteúdo do arquivo em bytes
+        nome_arquivo: Nome original do arquivo
+        provider: Instância do provedor de IA configurado
+
+    Returns:
+        Dicionário com tipo_documento e dados extraídos
+    """
     extensao = Path(nome_arquivo).suffix.lower()
     imagens: list[Image.Image] = []
 
     if extensao == ".pdf":
         imagens = converter_pdf_para_imagens(arquivo_bytes)
-    elif extensao in [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"]:
-        imagem = Image.open(io.BytesIO(arquivo_bytes))
-        imagens = [imagem]
+    elif extensao in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}:
+        imagens = [Image.open(io.BytesIO(arquivo_bytes))]
     else:
         raise ValueError(f"Formato de arquivo não suportado: {extensao}")
 
     if not imagens:
         raise ValueError("Nenhuma imagem pôde ser extraída do arquivo")
 
-    imagens_para_processar = imagens[:3]
-    partes = [PROMPT_EXTRACAO]
-
-    for img in imagens_para_processar:
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
+    # Processa até 3 páginas/imagens por arquivo
+    imagens_base64 = []
+    for img in imagens[:3]:
         img_bytes = imagem_para_bytes(img)
-        partes.append({
-            "mime_type": "image/jpeg",
-            "data": base64.b64encode(img_bytes).decode("utf-8")
-        })
+        imagens_base64.append(base64.b64encode(img_bytes).decode("utf-8"))
 
-    resposta = modelo_gemini.generate_content(partes)
-    texto_resposta = resposta.text.strip()
+    # Delega para o provedor de IA
+    texto_resposta = provider.gerar_conteudo(PROMPT_EXTRACAO, imagens_base64)
 
     if texto_resposta.startswith("```"):
         linhas = texto_resposta.split("\n")

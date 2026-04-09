@@ -1,126 +1,87 @@
 """
 API principal do sistema LeitorDeDocs.
-Endpoints FastAPI para upload e processamento de documentos.
+Suporta múltiplos provedores de IA: Gemini, Groq (Llama) e Ollama (Llama local).
+Configure o provedor desejado com AI_PROVIDER no arquivo .env.
 """
 import logging
 import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Optional
 
-import google.generativeai as genai
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
 
+from ai_provider import AIProvider, criar_provedor
 from document_processor import TIPOS_DOCUMENTOS, processar_documento
 from models import RespostaProcessamento, ResultadoArquivo
 
-# Carrega variáveis de ambiente
 load_dotenv()
 
-# Configuração de logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Tamanho máximo de arquivo: 20MB
 MAX_FILE_SIZE = 20 * 1024 * 1024
-
-# Extensões permitidas
 EXTENSOES_PERMITIDAS = {".pdf", ".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}
 
-# Instância global do modelo Gemini
-modelo_gemini: Optional[genai.GenerativeModel] = None
-gemini_disponivel: bool = False
-
-# Modelos preferidos em ordem de prioridade (do mais novo ao mais antigo)
-MODELOS_PREFERIDOS = [
-    "gemini-2.0-flash",
-    "gemini-2.0-flash-lite",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-pro",
-    "gemini-1.5-pro-latest",
-    "gemini-pro-vision",
-]
+provider: Optional[AIProvider] = None
+ia_disponivel: bool = False
 
 
-def _detectar_modelo_disponivel() -> str:
-    """
-    Lista os modelos disponíveis na conta e retorna o melhor compatível.
-    Seleciona o primeiro da lista de preferidos que suporte generateContent.
-    Caso nenhum seja encontrado, usa gemini-2.0-flash como padrão.
-    """
-    try:
-        modelos_disponiveis = set()
-        for m in genai.list_models():
-            if "generateContent" in (m.supported_generation_methods or []):
-                modelos_disponiveis.add(m.name.replace("models/", ""))
-
-        logger.info(f"Modelos disponíveis na conta: {sorted(modelos_disponiveis)}")
-
-        for preferido in MODELOS_PREFERIDOS:
-            if preferido in modelos_disponiveis:
-                return preferido
-
-        # Se nenhum preferido estiver disponível, usa o primeiro da lista
-        if modelos_disponiveis:
-            escolhido = sorted(modelos_disponiveis)[0]
-            logger.warning(f"Nenhum modelo preferido encontrado. Usando: {escolhido}")
-            return escolhido
-
-    except Exception as e:
-        logger.warning(f"Não foi possível listar modelos ({e}). Usando padrão: gemini-2.0-flash")
-
-    return "gemini-2.0-flash"
+def _ler_config() -> dict:
+    """Lê as configurações de provedor do ambiente."""
+    return {
+        "provider":        os.getenv("AI_PROVIDER", "gemini").strip(),
+        "gemini_api_key":  os.getenv("GEMINI_API_KEY", "").strip(),
+        "groq_api_key":    os.getenv("GROQ_API_KEY", "").strip(),
+        "groq_model":      os.getenv("GROQ_MODEL", "").strip(),
+        "ollama_base_url": os.getenv("OLLAMA_BASE_URL", "http://localhost:11434").strip(),
+        "ollama_model":    os.getenv("OLLAMA_MODEL", "").strip(),
+    }
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Gerencia o ciclo de vida da aplicação."""
-    global modelo_gemini, gemini_disponivel
+    global provider, ia_disponivel
 
-    api_key = os.getenv("GEMINI_API_KEY", "").strip()
+    config = _ler_config()
+    nome_provedor = config["provider"]
 
-    if not api_key:
+    # Verifica se as credenciais mínimas estão presentes antes de tentar conectar
+    chave_ausente = (
+        (nome_provedor == "gemini" and not config["gemini_api_key"]) or
+        (nome_provedor == "groq"   and not config["groq_api_key"])
+    )
+
+    if chave_ausente:
+        chave_necessaria = "GEMINI_API_KEY" if nome_provedor == "gemini" else "GROQ_API_KEY"
         logger.warning(
-            "⚠️  GEMINI_API_KEY não configurada. "
-            "O servidor iniciou, mas o processamento de documentos estará desativado. "
-            "Configure a chave no arquivo .env para ativar o processamento."
+            f"⚠️  {chave_necessaria} não configurada para o provedor '{nome_provedor}'. "
+            f"O servidor iniciou, mas o processamento estará desativado. "
+            f"Configure a chave no arquivo .env."
         )
-        gemini_disponivel = False
+        ia_disponivel = False
     else:
         try:
-            genai.configure(api_key=api_key)
-            nome_modelo = _detectar_modelo_disponivel()
-            modelo_gemini = genai.GenerativeModel(
-                model_name=nome_modelo,
-                generation_config={
-                    "temperature": 0.1,
-                    "top_p": 0.95,
-                    "max_output_tokens": 2048,
-                }
-            )
-            gemini_disponivel = True
-            logger.info(f"✅ Google Gemini configurado com sucesso — modelo: {nome_modelo}")
+            provider = criar_provedor(config)
+            ia_disponivel = True
+            logger.info(f"✅ Provedor de IA configurado: {provider.nome}")
         except Exception as e:
-            logger.error(f"❌ Erro ao configurar Gemini: {e}")
-            gemini_disponivel = False
+            logger.error(f"❌ Erro ao configurar provedor de IA '{nome_provedor}': {e}")
+            ia_disponivel = False
 
     yield
-
     logger.info("Servidor encerrado")
 
 
-# Cria a aplicação FastAPI
 app = FastAPI(
     title="LeitorDeDocs API",
-    description="Sistema de leitura e extração inteligente de documentos de transporte",
-    version="1.0.0",
+    description="Extração inteligente de documentos — suporta Gemini, Groq/Llama e Ollama/Llama",
+    version="2.0.0",
     lifespan=lifespan,
 )
 
-# Configuração CORS — permite requisições do frontend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -132,26 +93,27 @@ app.add_middleware(
 
 @app.get("/")
 async def raiz():
-    """Endpoint de status da API."""
     return {
         "status": "online",
-        "versao": "1.0.0",
-        "gemini_disponivel": gemini_disponivel,
-        "aviso": None if gemini_disponivel else (
-            "GEMINI_API_KEY não configurada. "
-            "Adicione a chave no arquivo .env para ativar o processamento."
+        "versao": "2.0.0",
+        "provedor": provider.nome if provider else None,
+        "ia_disponivel": ia_disponivel,
+        "aviso": None if ia_disponivel else (
+            "Provedor de IA não configurado. Verifique AI_PROVIDER e as chaves de API no arquivo .env."
         )
     }
 
 
 @app.get("/status")
 async def status():
-    """Verifica o status da API e da integração com Gemini."""
+    config = _ler_config()
     return {
         "api": "online",
-        "gemini": "configurado" if gemini_disponivel else "não configurado",
+        "provedor_configurado": config["provider"],
+        "ia": provider.nome if provider else "não configurado",
+        "ia_disponivel": ia_disponivel,
         "tipos_suportados": TIPOS_DOCUMENTOS,
-        "formatos_aceitos": list(EXTENSOES_PERMITIDAS),
+        "formatos_aceitos": sorted(EXTENSOES_PERMITIDAS),
         "tamanho_maximo_mb": MAX_FILE_SIZE // (1024 * 1024),
     }
 
@@ -159,26 +121,24 @@ async def status():
 @app.post("/processar", response_model=RespostaProcessamento)
 async def processar_documentos(arquivos: list[UploadFile] = File(...)):
     """
-    Processa múltiplos documentos enviados pelo usuário.
-
+    Processa múltiplos documentos usando o provedor de IA configurado.
     Aceita: PDF, JPG, PNG, WEBP, BMP, TIFF
-    Retorna: JSON estruturado com dados extraídos e níveis de confiança
     """
-    if not gemini_disponivel:
-        raise HTTPException(
-            status_code=503,
-            detail={
-                "erro": "Serviço indisponível",
-                "mensagem": (
-                    "A chave da API do Google Gemini não está configurada. "
-                    "Adicione GEMINI_API_KEY no arquivo .env e reinicie o servidor."
-                )
-            }
-        )
+    if not ia_disponivel or provider is None:
+        config = _ler_config()
+        nome_prov = config["provider"]
+        dicas = {
+            "gemini": "Adicione GEMINI_API_KEY no .env — obtenha em https://aistudio.google.com/app/apikey",
+            "groq":   "Adicione GROQ_API_KEY no .env — obtenha gratuitamente em https://console.groq.com",
+            "ollama": "Instale o Ollama (https://ollama.com) e execute: ollama pull llama3.2-vision",
+        }
+        raise HTTPException(status_code=503, detail={
+            "erro": "Provedor de IA não configurado",
+            "mensagem": dicas.get(nome_prov, f"Configure o provedor '{nome_prov}' no arquivo .env.")
+        })
 
     if not arquivos:
         raise HTTPException(status_code=400, detail="Nenhum arquivo enviado")
-
     if len(arquivos) > 20:
         raise HTTPException(status_code=400, detail="Máximo de 20 arquivos por requisição")
 
@@ -187,23 +147,19 @@ async def processar_documentos(arquivos: list[UploadFile] = File(...)):
 
     for arquivo in arquivos:
         nome = arquivo.filename or "arquivo_sem_nome"
-        logger.info(f"Processando: {nome}")
+        logger.info(f"Processando: {nome} via {provider.nome}")
 
-        # Valida extensão
-        from pathlib import Path
         extensao = Path(nome).suffix.lower()
         if extensao not in EXTENSOES_PERMITIDAS:
             resultados.append(ResultadoArquivo(
                 nome_arquivo=nome,
-                erro=f"Formato não suportado: {extensao}. Use: {', '.join(EXTENSOES_PERMITIDAS)}",
+                erro=f"Formato não suportado: {extensao}. Use: {', '.join(sorted(EXTENSOES_PERMITIDAS))}",
                 reconhecido=False
             ))
             continue
 
-        # Lê o conteúdo do arquivo
         conteudo = await arquivo.read()
 
-        # Valida tamanho
         if len(conteudo) > MAX_FILE_SIZE:
             resultados.append(ResultadoArquivo(
                 nome_arquivo=nome,
@@ -213,38 +169,25 @@ async def processar_documentos(arquivos: list[UploadFile] = File(...)):
             continue
 
         if len(conteudo) == 0:
-            resultados.append(ResultadoArquivo(
-                nome_arquivo=nome,
-                erro="Arquivo vazio",
-                reconhecido=False
-            ))
+            resultados.append(ResultadoArquivo(nome_arquivo=nome, erro="Arquivo vazio", reconhecido=False))
             continue
 
-        # Processa com Gemini
         try:
-            resultado_doc = processar_documento(conteudo, nome, modelo_gemini)
-
+            resultado_doc = processar_documento(conteudo, nome, provider)
             tipo = resultado_doc.get("tipo_documento", "DESCONHECIDO")
             dados = resultado_doc.get("dados", {})
-
             reconhecido = tipo != "DESCONHECIDO"
+
             if reconhecido:
                 tipos_encontrados.add(tipo)
 
             resultados.append(ResultadoArquivo(
-                nome_arquivo=nome,
-                tipo_documento=tipo,
-                dados=dados,
-                reconhecido=reconhecido
+                nome_arquivo=nome, tipo_documento=tipo, dados=dados, reconhecido=reconhecido
             ))
 
         except ValueError as e:
             logger.error(f"Erro de validação em {nome}: {e}")
-            resultados.append(ResultadoArquivo(
-                nome_arquivo=nome,
-                erro=str(e),
-                reconhecido=False
-            ))
+            resultados.append(ResultadoArquivo(nome_arquivo=nome, erro=str(e), reconhecido=False))
         except Exception as e:
             logger.error(f"Erro ao processar {nome}: {e}")
             resultados.append(ResultadoArquivo(
@@ -253,9 +196,7 @@ async def processar_documentos(arquivos: list[UploadFile] = File(...)):
                 reconhecido=False
             ))
 
-    # Calcula documentos faltantes
-    todos_tipos = set(TIPOS_DOCUMENTOS)
-    faltantes = sorted(todos_tipos - tipos_encontrados)
+    faltantes = sorted(set(TIPOS_DOCUMENTOS) - tipos_encontrados)
 
     return RespostaProcessamento(
         arquivos_processados=resultados,

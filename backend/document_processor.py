@@ -1,23 +1,22 @@
 """
-Processador de documentos usando Google Gemini AI.
-Responsável por identificar o tipo de documento e extrair dados estruturados.
+Processador de documentos — agnóstico ao provedor de IA.
+Converte arquivos em imagens e delega a extração para o AIProvider configurado.
 """
+import base64
 import io
 import json
 import logging
-import base64
 from pathlib import Path
-from typing import Optional
 
-import google.generativeai as genai
 from PIL import Image
+
+from ai_provider import AIProvider
 
 logger = logging.getLogger(__name__)
 
 # Tipos de documentos suportados
 TIPOS_DOCUMENTOS = ["CNH", "MOPP", "NR20", "NR35", "Licenciamento", "CIV", "CIPP", "Calibragem", "Cronotacógrafo"]
 
-# Prompt base para extração de documentos
 PROMPT_EXTRACAO = """Você é um sistema especializado em leitura e extração de dados de documentos brasileiros de transporte e segurança do trabalho.
 
 Analise a imagem fornecida e:
@@ -145,8 +144,8 @@ IMPORTANTE:
 
 def converter_pdf_para_imagens(pdf_bytes: bytes) -> list[Image.Image]:
     """
-    Converte um PDF em lista de imagens PIL usando PyMuPDF (fitz).
-    Não requer Poppler nem nenhuma dependência externa do sistema.
+    Converte PDF em imagens usando PyMuPDF (fitz).
+    Não requer Poppler — funciona em qualquer sistema operacional.
     """
     try:
         import fitz  # PyMuPDF
@@ -156,7 +155,7 @@ def converter_pdf_para_imagens(pdf_bytes: bytes) -> list[Image.Image]:
 
         for numero_pagina in range(len(doc)):
             pagina = doc[numero_pagina]
-            # DPI 200 → zoom = 200/72 ≈ 2.78
+            # DPI 200 → zoom = 200/72
             matriz = fitz.Matrix(200 / 72, 200 / 72)
             pixmap = pagina.get_pixmap(matrix=matriz, colorspace=fitz.csRGB)
             img_bytes = pixmap.tobytes("jpeg")
@@ -171,17 +170,19 @@ def converter_pdf_para_imagens(pdf_bytes: bytes) -> list[Image.Image]:
         raise ValueError(f"Não foi possível converter o PDF: {str(e)}")
 
 
-def imagem_para_bytes(imagem: Image.Image, formato: str = "JPEG") -> bytes:
-    """Converte imagem PIL para bytes."""
+def imagem_para_bytes(imagem: Image.Image) -> bytes:
+    """Converte imagem PIL para bytes JPEG."""
     buffer = io.BytesIO()
-    imagem.save(buffer, format=formato, quality=95)
+    if imagem.mode not in ("RGB", "L"):
+        imagem = imagem.convert("RGB")
+    imagem.save(buffer, format="JPEG", quality=95)
     return buffer.getvalue()
 
 
 def processar_documento(
     arquivo_bytes: bytes,
     nome_arquivo: str,
-    modelo_gemini: genai.GenerativeModel
+    provider: AIProvider
 ) -> dict:
     """
     Processa um único documento e retorna os dados extraídos.
@@ -189,7 +190,7 @@ def processar_documento(
     Args:
         arquivo_bytes: Conteúdo do arquivo em bytes
         nome_arquivo: Nome original do arquivo
-        modelo_gemini: Instância do modelo Gemini configurado
+        provider: Instância do provedor de IA configurado
 
     Returns:
         Dicionário com tipo_documento e dados extraídos
@@ -197,50 +198,32 @@ def processar_documento(
     extensao = Path(nome_arquivo).suffix.lower()
     imagens: list[Image.Image] = []
 
-    # Determina como carregar o arquivo
     if extensao == ".pdf":
         imagens = converter_pdf_para_imagens(arquivo_bytes)
-    elif extensao in [".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"]:
-        imagem = Image.open(io.BytesIO(arquivo_bytes))
-        imagens = [imagem]
+    elif extensao in {".jpg", ".jpeg", ".png", ".webp", ".bmp", ".tiff", ".tif"}:
+        imagens = [Image.open(io.BytesIO(arquivo_bytes))]
     else:
         raise ValueError(f"Formato de arquivo não suportado: {extensao}")
 
     if not imagens:
         raise ValueError("Nenhuma imagem pôde ser extraída do arquivo")
 
-    # Usa apenas a primeira imagem (ou as primeiras páginas para PDFs multipágina)
-    # Para documentos longos, processa até 3 páginas
-    imagens_para_processar = imagens[:3]
-
-    # Prepara o conteúdo para o Gemini
-    partes = [PROMPT_EXTRACAO]
-
-    for i, img in enumerate(imagens_para_processar):
-        # Converte para RGB se necessário
-        if img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-
+    # Processa até 3 páginas/imagens por arquivo
+    imagens_base64 = []
+    for img in imagens[:3]:
         img_bytes = imagem_para_bytes(img)
-        partes.append({
-            "mime_type": "image/jpeg",
-            "data": base64.b64encode(img_bytes).decode("utf-8")
-        })
+        imagens_base64.append(base64.b64encode(img_bytes).decode("utf-8"))
 
-    # Envia para o Gemini
-    resposta = modelo_gemini.generate_content(partes)
-    texto_resposta = resposta.text.strip()
+    # Delega para o provedor de IA
+    texto_resposta = provider.gerar_conteudo(PROMPT_EXTRACAO, imagens_base64)
 
     # Remove possíveis marcadores de código markdown
     if texto_resposta.startswith("```"):
         linhas = texto_resposta.split("\n")
-        # Remove primeira e última linha se forem marcadores
         if linhas[0].startswith("```"):
             linhas = linhas[1:]
         if linhas and linhas[-1].strip() == "```":
             linhas = linhas[:-1]
         texto_resposta = "\n".join(linhas)
 
-    # Parseia o JSON
-    resultado = json.loads(texto_resposta)
-    return resultado
+    return json.loads(texto_resposta)
